@@ -1,0 +1,306 @@
+---
+title: "Gender_Recog_DigitalPattern"
+author: "Prateek_Nayan"
+date: "6/15/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(stringr,dplyr, ggplot2, tidytext, tidyverse, randomForest, rpart, rpart.plot, mice, e1071, C50,caret)
+```
+
+```{r loading data}
+#Reading data
+gender_classifier <- read.csv("gender-classifier.csv")
+str(gender_classifier)
+unique(gender_classifier$X_unit_state)
+
+#missing values
+sum(is.na(gender_classifier))
+
+#summary of data
+summary(gender_classifier)
+```
+
+```{r plotting X_golden col}
+ggplot(gender_classifier,aes(X_golden))+geom_bar()
+```
+
+```{r plotting column gender.confidence }
+ggplot(gender_classifier,aes(gender.confidence,fill=gender))+geom_histogram()
+```
+
+```{r plotting column profile_yn column }
+ggplot(gender_classifier,aes(profile_yn,fill = gender))+geom_bar()
+```
+
+```{r}
+ggplot(gender_classifier,aes(link_color,fill = gender))+geom_bar()
+```
+
+```{r}
+unique(gender_classifier$gender)
+#dropping columns
+gender_classifier <- gender_classifier[,-c(1,2,3,4,5,7,9,10,13,15,16,17,18,20,21,23,24,25,26)]
+names(gender_classifier)
+str(gender_classifier)
+
+#Reducing only to 2 levels for gender -> M and F
+gender_classifier_2 <- gender_classifier%>% filter(gender == c("female","male"))%>%
+  droplevels()
+unique(gender_classifier_2$gender)
+
+```
+
+```{r removing outliers}
+boxplot(gender_classifier_2$tweet_count)
+
+gender_classifier_2$tweet_count_no_outlier <- gender_classifier_2$tweet_count
+
+gender_classifier_2$tweet_count_no_outlier[(gender_classifier_2$tweet_count < quantile(gender_classifier_2$tweet_count,0.25) - 1.5*IQR(gender_classifier_2$tweet_count) |
+                                               gender_classifier_2$tweet_count > quantile(gender_classifier_2$tweet_count,0.75) + 1.5*IQR(gender_classifier_2$tweet_count))] <- NA
+
+gender_classifier_2$fav_num_no_outlier <- gender_classifier_2$fav_number
+
+gender_classifier_2$fav_num_no_outlier[(gender_classifier_2$fav_number < quantile(gender_classifier_2$fav_number,0.25) - 1.5*IQR(gender_classifier_2$fav_number) |
+                                           gender_classifier_2$fav_number > quantile(gender_classifier_2$fav_number,0.75) + 1.5*IQR(gender_classifier_2$fav_number))] <- NA
+```
+
+```{r}
+for(i in 1:nrow(gender_classifier_2)){
+  if(gender_classifier_2$tweet_count[i] < 933) {
+    gender_classifier_2$tweet_num_count[i] <- "low tweets"
+  }
+  else if (gender_classifier_2$tweet_count[i] > 933 & gender_classifier_2$tweet_count[i] <= 4094) {
+    gender_classifier_2$tweet_num_count[i] <- "medium tweets"
+  }
+  else if (gender_classifier_2$tweet_count[i] > 4094 & gender_classifier_2$tweet_count[i] <= 13672) {
+    gender_classifier_2$tweet_num_count[i] <- "high tweets"
+  }
+    else{
+    gender_classifier_2$tweet_num_count[i] <- "very high tweets"
+  } 
+}
+```
+
+
+
+```{r}
+#Tokenizing the description column to discover common words used 
+gender_classifier_2$description <- as.character(gender_classifier_2$description)
+gender_classifier_tokenized <- gender_classifier_2%>%
+                              unnest_tokens(word,description)%>%
+                              anti_join(stop_words)
+
+gender_classifier_tokenized %>%
+             count(word) %>%
+            arrange(desc(n))
+```
+
+```{r Creeating list of custom words which will not be needed in our model}
+
+custom_stop_words <- tribble(
+  ~word, ~lexicon,
+  "ۉ", "CUSTOM",
+  "twitter","CUSTOM",
+  "tweets","CUSTOM",
+  "t.co","CUSTOM",
+  "https" , "CUSTOM",
+  "http" , "CUSTOM",
+  "18" , "CUSTOM",
+  "1" , "CUSTOM",
+  "4","CUSTOM",
+  "2","CUSTOM",
+  "15","CUSTOM",
+  "_","CUSTOM",
+  "tweet","CUSTOM",
+  "2015","CUSTOM",
+  "5","CUSTOM",
+  "3","CUSTOM",
+  "20","CUSTOM",
+  "17","CUSTOM",
+  "6","CUSTOM",
+  "7","CUSTOM",
+  "8","CUSTOM",
+  "9","CUSTOM",
+  "10","CUSTOM",
+  "11","CUSTOM",
+  "12","CUSTOM",
+  "13","CUSTOM",
+  "14","CUSTOM",
+  "16","CUSTOM",
+  "19","CUSTOM",
+  "20","CUSTOM"
+)
+```
+
+```{r Combining by row by customized stop words with the stop_word tibble}
+stop_words_2 <- stop_words %>%
+             bind_rows(custom_stop_words)
+
+gender_tokenized_count_2 <- gender_classifier_tokenized %>%
+  anti_join(stop_words_2)
+
+
+str(gender_tokenized_count_2)
+```
+
+```{r Word count to retain the most relevant}
+gender_tokenized_count_3 <- gender_tokenized_count_2 %>%
+                            count(word) %>%
+                            filter(n > 100)%>%
+                            mutate(word2 = fct_reorder(word,n))
+```
+
+```{r}
+#Filtering for words that occur most and useful
+gender_classifier_X <- gender_tokenized_count_2 %>%
+                       filter(word %in% c("love","life","news","music","follow","fan","world","writer","time","sports","lover","live","business",                    "free","instagram","god","people","media","ig","account","marketing","student","social","official","artist"))
+
+str(gender_classifier_X)
+gender_classifier_X$tweet_num_count <- as.factor(gender_classifier_X$tweet_num_count)
+```
+```{r}
+#Reducing more columns
+gender_classifier_3 <- gender_classifier_X[,-c(2,3,6)]
+```
+
+```{r}
+#Cleaning data to take care of spaces and converting columns to factor variables
+
+gender_classifier_3$link_color <- str_pad(gender_classifier_3$link_color,width = 6,side = "right",pad = "0")
+gender_classifier_3$link_color <- as.factor(gender_classifier_3$link_color)
+
+gender_classifier_3$sidebar_color <- str_pad(gender_classifier_3$sidebar_color,width = 6,side = "right",pad = "0")
+gender_classifier_3$sidebar_color <- as.factor(gender_classifier_3$sidebar_color)
+```
+
+
+```{r}
+str(gender_classifier_3)
+
+#Percentage of missing values
+p <- function(x){
+    sum(is.na(x))/length(x)*100    
+}
+
+#apply to all coulmns 
+apply(gender_classifier_3,2,p)
+```
+```{r}
+#Deleting rows with incomplete data
+gender_classifier_4 <- gender_classifier_3[,c(1,2,3,6,7)]
+
+str(gender_classifier_4)
+```
+```{r}
+#Exploring data for the most meaningful colors in these columns 
+
+gender_link <-  gender_classifier_4 %>%
+  select("gender","link_color")%>%
+  group_by(gender)%>%
+  count(gender,link_color)%>%
+  arrange(desc(n))
+
+as.data.frame(gender_link) 
+View(gender_link)
+colors <- c("ABB8C2","3B94D9","000000","B40B43","0099B9",
+            "385430","89C9FA","FA743E","94D487","D02B55",
+            "990000","CC3366 ","1F98C7","882530",
+            "0000FF","9D582E","3B94D9","93A644","0099CC",
+            "FFCC4D","FF3300","96BEDF","999900","9266CC",
+            "F5ABB5","2FC2EF","4A913C","FF0000","DD2E44")
+```
+
+```{r}
+gender_sidebar <- gender_classifier_4 %>%
+  group_by(gender)%>%
+  count(gender,sidebar_color)%>%
+  arrange(desc(n))
+
+as.data.frame(gender_sidebar)
+
+colors_sidebar <- c("000000","FFFFFF","EEEEEE","181A1E","65B0DA","A8C7F7","5ED4DC","CC3366","BDDCAD","829D5E","D3D2CF","86A4A6","DBE9ED",
+                    "F2E195","C6E2EE","87BC44","D9B17E","FFF8AD","DFDFDF")
+```
+
+```{r}
+#Filtering to keep only colors that will be used in model
+gender_classifier_5 <- gender_classifier_4 %>%
+                       filter(link_color %in% colors,sidebar_color %in% colors_sidebar)%>%
+                            droplevels()
+gender_classifier_5$word <- as.factor(gender_classifier_5$word)
+```
+
+```{r}
+#Naive bayes model 
+
+sample_size <- floor(0.7 * nrow(gender_classifier_5))
+sample_size
+
+training_index <- sample(nrow(gender_classifier_5),size = sample_size, replace = FALSE)
+
+train <- gender_classifier_5[training_index,]
+test <- gender_classifier_5[-training_index,]
+
+twitter_model <- naiveBayes(gender ~ link_color+sidebar_color+tweet_num_count+word,data = train)
+
+
+twitter_predict <- predict(twitter_model,test,type = 'class')
+
+mean(twitter_predict == test$gender)
+
+results <- data.frame(predicted = twitter_predict,actual = test[,'gender'])
+
+table(results)
+confusionMatrix(twitter_predict,test$gender )
+
+```
+
+```{r}
+#Random forest model
+twitter_model <- randomForest(gender~link_color+sidebar_color+tweet_num_count+word,data = train)
+
+twitter_predict_randomF <- predict(twitter_model,test)
+
+mean(twitter_predict_randomF == test$gender)
+
+results_1 <- data.frame(predicted = twitter_predict_randomF,actual = test[,'gender'])
+
+table(results_1)
+confusionMatrix(twitter_predict_randomF,test$gender)
+```
+
+```{r c5.0 decision tree}
+predictors <- c("link_color","sidebar_color","tweet_num_count","word")
+
+model <- C5.0(x = gender_classifier_5[predictors], y = as.factor(gender_classifier_5$gender))
+
+plot(model)
+```
+
+```{r}
+#Using the rpart package for decision tree 
+m <- rpart(gender ~ link_color+sidebar_color+tweet_num_count+word, data = train,method = "class", control =rpart.control(cp=0))
+
+rpart_predict <- predict(m, test,type = "class")
+
+table(rpart_predict,test$gender)
+
+mean(rpart_predict == test$gender)
+```
+
+rpart_predict female male
+       female    115   67
+       male       42   97
+
+       
+```{r}
+rpart.plot(m)
+```
+
